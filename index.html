@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Online Shashka</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:system-ui,Arial,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:14px;gap:12px}
+  h1{font-size:22px}
+  #status{font-size:16px;text-align:center;min-height:24px}
+  .bar{display:flex;gap:10px;align-items:center;font-size:15px}
+  .dot{width:16px;height:16px;border-radius:50%;display:inline-block;border:2px solid #475569;vertical-align:middle}
+  .dot.w{background:#f1f5f9}.dot.b{background:#1e293b;border-color:#94a3b8}
+  #board{width:min(94vw,520px);aspect-ratio:1;display:grid;grid-template-columns:repeat(8,1fr);border:4px solid #78350f;border-radius:6px;overflow:hidden}
+  .sq{position:relative;display:flex;align-items:center;justify-content:center}
+  .sq.l{background:#f5deb3}.sq.d{background:#8b5a2b}
+  .sq.sel{background:#facc15}
+  .sq.hint::after{content:"";width:28%;height:28%;border-radius:50%;background:#22c55e;opacity:.8;position:absolute}
+  .p{width:78%;height:78%;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:clamp(14px,5vw,26px);box-shadow:0 3px 5px #0008;z-index:1}
+  .p.w{background:radial-gradient(circle at 35% 30%,#fff,#cbd5e1);color:#b45309;border:2px solid #94a3b8}
+  .p.b{background:radial-gradient(circle at 35% 30%,#475569,#0f172a);color:#fbbf24;border:2px solid #020617}
+  button{padding:12px 22px;border:none;border-radius:10px;background:#22c55e;color:#fff;font-size:16px;font-weight:600;cursor:pointer}
+  button.red{background:#ef4444}
+  button.gray{background:#475569}
+  #btns{display:flex;gap:10px}
+</style>
+</head>
+<body>
+<h1>♟ Online Shashka</h1>
+<div class="bar" id="info" style="display:none">
+  Siz: <span class="dot" id="myDot"></span> <span id="myName"></span>
+</div>
+<div id="status">Boshlash uchun tugmani bosing</div>
+<div id="board"></div>
+<div id="btns">
+  <button id="playBtn">🎮 Raqib topish</button>
+  <button id="cancelBtn" class="gray" style="display:none">Bekor qilish</button>
+  <button id="resignBtn" class="red" style="display:none">Taslim bo'lish</button>
+</div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getDatabase, ref, set, push, onValue, remove, runTransaction, onDisconnect, update }
+  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+
+// ====== SHU YERGA O'ZINGIZNING FIREBASE SOZLAMALARINGIZNI QO'YING ======
+const firebaseConfig = {
+  apiKey: "SIZNING_API_KEY",
+  authDomain: "SIZNING_PROYEKT.firebaseapp.com",
+  databaseURL: "https://SIZNING_PROYEKT-default-rtdb.firebaseio.com",
+  projectId: "SIZNING_PROYEKT",
+  appId: "SIZNING_APP_ID"
+};
+// =======================================================================
+
+const db = getDatabase(initializeApp(firebaseConfig));
+const $ = id => document.getElementById(id);
+const myId = Math.random().toString(36).slice(2) + Date.now().toString(36);
+
+// ---------- Shashka qoidalari (rus shashkasi) ----------
+const DIRS = [[-1,-1],[-1,1],[1,-1],[1,1]];
+const inb = (r,c) => r>=0 && r<8 && c>=0 && c<8;
+const colorOf = p => p ? (p.toLowerCase()==='w' ? 'w' : 'b') : null;
+const isKing = p => p==='W' || p==='B';
+const promoRow = (color,i) => (color==='w' && i<8) || (color==='b' && i>=56);
+
+function initialBoard(){
+  const b = Array(64).fill(null);
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++){
+    if((r+c)%2===1){
+      if(r<3) b[r*8+c]='b';
+      if(r>4) b[r*8+c]='w';
+    }
+  }
+  return b;
+}
+
+function capSeqs(bd, pos, color, king, caps, path){
+  const r0=Math.floor(pos/8), c0=pos%8, res=[];
+  for(const [dr,dc] of DIRS){
+    let r=r0+dr, c=c0+dc;
+    if(king) while(inb(r,c) && bd[r*8+c]===null){ r+=dr; c+=dc; }
+    if(!inb(r,c)) continue;
+    const ei=r*8+c, e=bd[ei];
+    if(!e || colorOf(e)===color || caps.includes(ei)) continue;
+    const lands=[];
+    let lr=r+dr, lc=c+dc;
+    while(inb(lr,lc) && bd[lr*8+lc]===null){ lands.push(lr*8+lc); if(!king) break; lr+=dr; lc+=dc; }
+    if(!lands.length) continue;
+    const nc=[...caps, ei];
+    const sub=lands.map(l=>{
+      const k2 = king || promoRow(color,l);
+      return {l, k2, s:capSeqs(bd,l,color,k2,nc,[...path,l])};
+    });
+    const cont=sub.filter(x=>x.s.length);
+    if(cont.length) cont.forEach(x=>res.push(...x.s));
+    else sub.forEach(x=>res.push({path:[...path,x.l], caps:nc, king:x.k2}));
+  }
+  return res;
+}
+
+function legalMoves(bd, color){
+  const caps=[], simple=[];
+  for(let i=0;i<64;i++){
+    const p=bd[i];
+    if(!p || colorOf(p)!==color) continue;
+    const bd2=bd.slice(); bd2[i]=null;
+    capSeqs(bd2,i,color,isKing(p),[],[]).forEach(s=>caps.push({from:i,...s}));
+    if(caps.length) continue;
+    const r0=Math.floor(i/8), c0=i%8;
+    if(isKing(p)){
+      for(const [dr,dc] of DIRS){
+        let r=r0+dr,c=c0+dc;
+        while(inb(r,c) && bd[r*8+c]===null){ simple.push({from:i,path:[r*8+c],caps:[],king:true}); r+=dr; c+=dc; }
+      }
+    } else {
+      const dr = color==='w' ? -1 : 1;
+      for(const dc of [-1,1]){
+        const r=r0+dr, c=c0+dc;
+        if(inb(r,c) && bd[r*8+c]===null)
+          simple.push({from:i,path:[r*8+c],caps:[],king:promoRow(color,r*8+c)});
+      }
+    }
+  }
+  return caps.length ? caps : simple;
+}
+
+function applyMove(bd, m, color){
+  const p=bd[m.from];
+  const b=bd.slice();
+  b[m.from]=null;
+  m.caps.forEach(i=>b[i]=null);
+  const to=m.path[m.path.length-1];
+  const king = isKing(p) || m.king;
+  b[to] = king ? color.toUpperCase() : color;
+  return b;
+}
+
+const ser = b => b.map(x=>x||'.').join('');
+const des = s => s.split('').map(x=>x==='.'?null:x);
+
+// ---------- Holat ----------
+let gid=null, myColor=null, game=null, selected=null, unsubGame=null;
+let waitingTimer=null, unsubMatch=null;
+const qRef = ref(db,'queue');
+
+function setStatus(t){ $('status').textContent = t; }
+
+// ---------- Chizish ----------
+function render(){
+  const boardEl = $('board');
+  boardEl.innerHTML='';
+  const bd = game ? des(game.board) : initialBoard();
+  const flip = myColor==='b';
+  const myTurn = game && game.status==='playing' && game.turn===myColor;
+  const moves = myTurn ? legalMoves(bd,myColor) : [];
+  const selMoves = selected!==null ? moves.filter(m=>m.from===selected) : [];
+  const hints = new Set(selMoves.map(m=>m.path[m.path.length-1]));
+  for(let k=0;k<64;k++){
+    const i = flip ? 63-k : k;
+    const r=Math.floor(i/8), c=i%8;
+    const sq=document.createElement('div');
+    sq.className='sq '+((r+c)%2===1?'d':'l');
+    if(i===selected) sq.classList.add('sel');
+    if(hints.has(i)) sq.classList.add('hint');
+    const p=bd[i];
+    if(p){
+      const el=document.createElement('div');
+      el.className='p '+colorOf(p);
+      if(isKing(p)) el.textContent='♛';
+      sq.appendChild(el);
+    }
+    sq.onclick=()=>clickSq(i,bd,moves);
+    boardEl.appendChild(sq);
+  }
+}
+
+function clickSq(i,bd,moves){
+  if(!game || game.status!=='playing' || game.turn!==myColor) return;
+  const p=bd[i];
+  if(p && colorOf(p)===myColor){ selected=i; render(); return; }
+  if(selected===null) return;
+  const m = moves.find(m=>m.from===selected && m.path[m.path.length-1]===i);
+  if(!m) return;
+  const nb = applyMove(bd,m,myColor);
+  const opp = myColor==='w'?'b':'w';
+  const upd = { board: ser(nb), turn: opp };
+  if(legalMoves(nb,opp).length===0){ upd.status='over'; upd.winner=myColor; upd.reason='Raqibning yurishi qolmadi'; }
+  selected=null;
+  update(ref(db,'games/'+gid), upd);
+}
+
+// ---------- O'yin kuzatuvi ----------
+function watchGame(){
+  unsubGame = onValue(ref(db,'games/'+gid), snap=>{
+    game = snap.val();
+    if(!game) return;
+    if(game.left && game.left!==myColor && game.status==='playing'){
+      update(ref(db,'games/'+gid), {status:'over', winner:myColor, reason:'Raqib chiqib ketdi'});
+      return;
+    }
+    if(game.status==='over'){
+      const won = game.winner===myColor;
+      setStatus((won?'🏆 Siz yutdingiz! ':'😞 Siz yutqazdingiz. ')+(game.reason||''));
+      onDisconnect(ref(db,`games/${gid}/left`)).cancel();
+      $('resignBtn').style.display='none';
+      $('playBtn').style.display='inline-block';
+      $('playBtn').textContent='🎮 Yangi o\'yin';
+    } else {
+      setStatus(game.turn===myColor ? '✅ Sizning yurishingiz' : '⏳ Raqib yurmoqda...');
+    }
+    render();
+  });
+}
+
+function startGame(id,color){
+  gid=id; myColor=color; game=null; selected=null;
+  $('info').style.display='flex';
+  $('myDot').className='dot '+color;
+  $('myName').textContent = color==='w' ? 'Oq (pastda)' : 'Qora (pastda)';
+  $('cancelBtn').style.display='none';
+  $('playBtn').style.display='none';
+  $('resignBtn').style.display='inline-block';
+  onDisconnect(ref(db,`games/${gid}/left`)).set(myColor);
+  watchGame();
+  render();
+}
+
+// ---------- Tasodifiy raqib topish ----------
+async function findMatch(){
+  if(unsubGame){ unsubGame(); unsubGame=null; }
+  gid=null; game=null; myColor=null; selected=null;
+  render();
+  $('playBtn').style.display='none';
+  $('cancelBtn').style.display='inline-block';
+  setStatus('🔎 Raqib qidirilmoqda...');
+  let opp=null;
+  await runTransaction(qRef, cur=>{
+    opp=null;
+    if(cur && cur.uid!==myId && Date.now()-cur.t<45000){ opp=cur; return null; }
+    return {uid:myId, t:Date.now()};
+  });
+  if(opp){
+    const id = push(ref(db,'games')).key;
+    await set(ref(db,'games/'+id), {
+      white: opp.uid, black: myId,
+      board: ser(initialBoard()), turn:'w', status:'playing'
+    });
+    await set(ref(db,'matches/'+opp.uid), id);
+    startGame(id,'b');
+  } else {
+    onDisconnect(qRef).remove();
+    waitingTimer = setInterval(()=>{
+      runTransaction(qRef, cur=> (cur && cur.uid===myId) ? {uid:myId,t:Date.now()} : undefined);
+    }, 15000);
+    unsubMatch = onValue(ref(db,'matches/'+myId), snap=>{
+      const id=snap.val();
+      if(!id) return;
+      stopWaiting(false);
+      remove(ref(db,'matches/'+myId));
+      startGame(id,'w');
+    });
+  }
+}
+
+function stopWaiting(removeQueue){
+  if(waitingTimer){ clearInterval(waitingTimer); waitingTimer=null; }
+  if(unsubMatch){ unsubMatch(); unsubMatch=null; }
+  onDisconnect(qRef).cancel();
+  if(removeQueue){
+    runTransaction(qRef, cur=> (cur && cur.uid===myId) ? null : undefined);
+  }
+}
+
+$('playBtn').onclick = findMatch;
+$('cancelBtn').onclick = ()=>{
+  stopWaiting(true);
+  $('cancelBtn').style.display='none';
+  $('playBtn').style.display='inline-block';
+  $('playBtn').textContent='🎮 Raqib topish';
+  setStatus('Bekor qilindi');
+};
+$('resignBtn').onclick = ()=>{
+  if(!game || game.status!=='playing') return;
+  if(!confirm("Taslim bo'lasizmi?")) return;
+  update(ref(db,'games/'+gid), {status:'over', winner: myColor==='w'?'b':'w', reason:"Taslim bo'ldi"});
+};
+
+render();
+</script>
+</body>
+</html>
